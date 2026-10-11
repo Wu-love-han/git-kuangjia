@@ -37,6 +37,9 @@
   .node-box { stroke-width: 1; cursor: pointer; }
   .node-box.sel { stroke-width: 2.6; }
   .node-box.hit { stroke: #ffd479; stroke-width: 3; }
+  #world .dim { opacity: .15; }
+  #searchCount { color: var(--ink3); font-size: 11px; min-width: 34px; text-align: right; }
+  #pngScale { max-width: 66px; }
   .node-title { fill: #f2f5fa; font-size: 12px; pointer-events: none; user-select: none; }
   .node-note { fill: #93a1b5; font-size: 10px; pointer-events: none; user-select: none; }
   .node-tag { cursor: pointer; }
@@ -138,8 +141,10 @@
     <button id="btnExport" title="导出 JSON">导出</button>
     <button id="btnSvg" title="导出 SVG（矢量，可再编辑）">SVG</button>
     <button id="btnPng" title="导出 PNG（图片）">PNG</button>
+    <select id="pngScale" title="PNG 导出倍率（会记住）"><option value="1">1x</option><option value="2">2x</option><option value="3">3x</option></select>
     <span class="sep"></span>
-    <input id="search" placeholder="搜索节点…" title="输入即高亮，回车定位" />
+    <input id="search" placeholder="搜索节点…" title="输入即淡化其余节点并高亮匹配，回车在匹配间循环定位" />
+    <span id="searchCount"></span>
     <span class="spacer"></span>
     <span id="status">就绪</span>
   </header>
@@ -1016,6 +1021,21 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
 
   let graph = KG.newGraph('默认框架')
   let view = { x: 0, y: 0, k: 1 }
+  /* 视图状态记忆：按框架名（文件名）把缩放/平移记在 localStorage，
+   * 不写进框架 JSON —— 老文件完全不用动，也和「自动保存」互不干扰。 */
+  const viewKeyOf = (name) => 'kgview:' + name
+  const saveView = () => {
+    try { localStorage.setItem(viewKeyOf(graph.name), JSON.stringify(view)) } catch { /* 记不住就算了 */ }
+  }
+  const loadView = () => {
+    try {
+      const saved = JSON.parse(localStorage.getItem(viewKeyOf(graph.name)) || 'null')
+      if (saved !== null && typeof saved === 'object' && Number.isFinite(saved.x) && Number.isFinite(saved.y) && Number.isFinite(saved.k) && saved.k > 0) {
+        return { x: saved.x, y: saved.y, k: saved.k }
+      }
+    } catch { /* 坏数据就当没有 */ }
+    return undefined
+  }
   let selection = { node: undefined, nodes: [], edge: undefined }
   let linkFrom = undefined          // 已选中的连线起点（左键点一下节点即选中起点）
   let pressState = undefined        // 本次按下的节点与位置（用来区分点击/拖动）
@@ -1027,7 +1047,8 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
   let dirty = false
   let offline = false
   let dragging = undefined
-  let searchHit = undefined
+  let searchHits = []              // 搜索命中的节点 id（按图顺序）
+  let searchIndex = -1             // 回车循环定位时当前停在 searchHits 的第几个
   let spacing = KG.DEFAULT_SPACING
   let bandSelect = undefined        // 右键拉框多选中
   let bandDragged = false           // 这一次右键到底拉没拉框（决定要不要弹菜单）
@@ -1245,13 +1266,16 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
   const render = () => {
     const parts = []
     const byId = {}
+    const searching = searchHits.length > 0
     for (const node of graph.nodes) byId[node.id] = node
     for (const edge of graph.edges) {
       const a = byId[edge.from]
       const b = byId[edge.to]
       if (a === undefined || b === undefined) continue
       const selected = selection.edge === edge.id
-      parts.push('<line class="edge' + (selected ? ' sel' : '') + '" data-edge="' + edge.id + '" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '" />')
+      // 搜索时：两端都没匹配上的连线一起淡化
+      const dimEdge = searching && searchHits.indexOf(edge.from) === -1 && searchHits.indexOf(edge.to) === -1
+      parts.push('<line class="edge' + (selected ? ' sel' : '') + (dimEdge ? ' dim' : '') + '" data-edge="' + edge.id + '" x1="' + a.x.toFixed(1) + '" y1="' + a.y.toFixed(1) + '" x2="' + b.x.toFixed(1) + '" y2="' + b.y.toFixed(1) + '" />')
       if (edge.label) {
         parts.push('<text class="edge-label" data-edge="' + edge.id + '" x="' + ((a.x + b.x) / 2).toFixed(1) + '" y="' + ((a.y + b.y) / 2 - 5).toFixed(1) + '" text-anchor="middle">' + KG.escapeXml(KG.clip(edge.label, 18)) + '</text>')
       }
@@ -1260,7 +1284,8 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       const selected = selection.nodes.indexOf(node.id) !== -1
       const isPrimary = selection.node === node.id
       const picked = linkFrom === node.id
-      const isHit = searchHit === node.id
+      const isHit = searchHits.indexOf(node.id) !== -1
+      const isDim = searching && isHit === false
       const shape = KG.SHAPES.indexOf(node.shape) === -1 ? 'rounded' : node.shape
       const size = KG.nodeSize(node)
       const radius = shape === 'rect' ? 2 : shape === 'pill' ? size.h / 2 : 9
@@ -1277,7 +1302,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
         ? '<rect class="node-resize" data-resize="' + node.id + '" x="' + (size.w - 9) + '" y="' + (size.h - 9) + '" width="9" height="9" rx="2" fill="' + KG.shade(node.color, 90) + '" />'
         : ''
       parts.push(
-        '<g data-node="' + node.id + '" transform="translate(' + x.toFixed(1) + ',' + y.toFixed(1) + ')">' +
+        '<g data-node="' + node.id + '" transform="translate(' + x.toFixed(1) + ',' + y.toFixed(1) + ')"' + (isDim ? ' class="dim"' : '') + '>' +
         '<rect class="node-box' + (selected || picked ? ' sel' : '') + (isHit ? ' hit' : '') + '" width="' + size.w + '" height="' + size.h + '" rx="' + radius + '" fill="' + KG.shade(node.color, -70) + '" stroke="' + (selected || picked || isHit ? KG.shade(node.color, 60) : KG.shade(node.color, -10)) + '" />' +
         '<circle class="node-dot" cx="13" cy="' + Math.min(size.h / 2, 20) + '" r="4" fill="' + KG.shade(node.color, 60) + '" />' +
         '<text class="node-title" x="24" y="' + (Math.min(size.h / 2, 20) + 4) + '">' + KG.escapeXml(KG.clip(node.title, titleLimit)) + '</text>' +
@@ -1307,6 +1332,15 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       world.appendChild(band)
     }
     renderGrid()
+  }
+
+  /* rAF 渲染节流：同一帧内的多次调用合并成一次真实绘制。
+   * 拖动 / 平移 / 缩放这些高频路径都走 scheduleRender；需要立刻出画面的场合仍可直接调 render()。 */
+  let renderQueued = false
+  const scheduleRender = () => {
+    if (renderQueued) return
+    renderQueued = true
+    requestAnimationFrame(() => { renderQueued = false; render() })
   }
 
   const syncPanel = () => {
@@ -1493,7 +1527,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
           selection = { node: merged[merged.length - 1], nodes: merged, edge: undefined }
         }
       }
-      render(); syncPanel()
+      scheduleRender(); syncPanel()
       return
     }
     if (dragging === undefined) return
@@ -1501,7 +1535,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     if (dragging.kind === 'pan') {
       view.x = dragging.x + (pos.x - dragging.sx)
       view.y = dragging.y + (pos.y - dragging.sy)
-      render()
+      scheduleRender()
       return
     }
     // 拖右下角把手改大小
@@ -1518,7 +1552,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       const nextH = dragging.startH + (world.y - dragging.worldStart.y) * 2
       node.w = snap(Math.max(KG.MIN_W, Math.min(KG.MAX_W, nextW)))
       node.h = snap(Math.max(KG.MIN_H, Math.min(KG.MAX_H, nextH)))
-      render()
+      scheduleRender()
       return
     }
     const node = KG.nodeById(graph, dragging.id)
@@ -1539,7 +1573,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       target.x = snap(from.x + (worldPoint.x - dragging.worldStart.x))
       target.y = snap(from.y + (worldPoint.y - dragging.worldStart.y))
     }
-    render()
+    scheduleRender()
   })
 
   window.addEventListener('mouseup', (event) => {
@@ -1568,6 +1602,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     dragging = undefined
     stage.classList.remove('dragging')
     if (wasPan) {
+      if (wasMoved) saveView()   // 平移结束，把这帧视图记下来
       // 左键点空白（没拖动）= 取消待连线的起点
       if (wasMoved !== true && pressState !== undefined) {
         const movedPx = Math.hypot(event.clientX - pressState.x, event.clientY - pressState.y)
@@ -1684,7 +1719,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     event.preventDefault()
     const pos = eventPos(event)
     view = KG.zoomAt(view, pos.x, pos.y, Math.exp(-event.deltaY * 0.0015))
-    render()
+    scheduleRender(); saveView()
   }, { passive: false })
 
   const addAt = (worldPoint) => {
@@ -1726,9 +1761,9 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     render(); scheduleSave()
     if (announce === true) toast(picked === undefined ? '间距 ' + spacing : '已选 ' + picked.length + ' 个节点：间距 ' + spacing)
   }
-  const doFit = () => { view = KG.fit(graph, canvas.clientWidth, canvas.clientHeight); render() }
+  const doFit = () => { view = KG.fit(graph, canvas.clientWidth, canvas.clientHeight); render(); saveView() }
   const toggleGrid = () => { showGrid = !showGrid; $('btnGrid').classList.toggle('on', showGrid); renderGrid(); toast(showGrid ? '网格吸附已开' : '网格已关') }
-  const zoomBy = (factor) => { view = KG.zoomAt(view, canvas.clientWidth / 2, canvas.clientHeight / 2, factor); render() }
+  const zoomBy = (factor) => { view = KG.zoomAt(view, canvas.clientWidth / 2, canvas.clientHeight / 2, factor); render(); saveView() }
 
   /* ---------------- 导出 ---------------- */
   const download = (name, blob) => {
@@ -1753,7 +1788,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     const image = new Image()
     const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }))
     image.onload = () => {
-      const scale = 2
+      const scale = Math.max(1, Math.min(3, Math.round(Number($('pngScale').value)) || 2))
       const target = document.createElement('canvas')
       target.width = image.width * scale
       target.height = image.height * scale
@@ -1799,7 +1834,7 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       }
       return
     }
-    if (event.key === 'Escape') { linkFrom = undefined; selection = { node: undefined, nodes: [], edge: undefined }; closeMenu(); render(); syncPanel(); return }
+    if (event.key === 'Escape') { linkFrom = undefined; selection = { node: undefined, nodes: [], edge: undefined }; closeMenu(); render(); syncPanel(); saveView(); return }
     if (event.key.toLowerCase() === 'n') { addAt(KG.toWorld(view, canvas.clientWidth / 2, canvas.clientHeight / 2)); return }
     if (event.key.toLowerCase() === 'l') { doLayout(); return }
     if (event.key.toLowerCase() === 'f') { doFit(); return }
@@ -2047,6 +2082,16 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
   $('btnExport').addEventListener('click', exportJson)
   $('btnSvg').addEventListener('click', exportSvg)
   $('btnPng').addEventListener('click', exportPng)
+  // PNG 倍率下拉：选择记在本地，右键菜单里的导出共用同一倍率
+  ;(() => {
+    const select = $('pngScale')
+    const stored = Math.round(Number(uiState.pngScale))
+    select.value = (stored === 1 || stored === 2 || stored === 3) ? String(stored) : '2'
+    select.addEventListener('change', () => {
+      uiState.pngScale = Number(select.value)
+      try { localStorage.setItem(uiKey, JSON.stringify(uiState)) } catch { /* 记不住就算了 */ }
+    })
+  })()
   $('btnImport').addEventListener('click', () => $('fileInput').click())
   $('fileInput').addEventListener('change', async () => {
     const file = $('fileInput').files[0]
@@ -2066,19 +2111,24 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
   })
   $('search').addEventListener('input', () => {
     const query = $('search').value.trim().toLowerCase()
-    if (query === '') { searchHit = undefined; render(); return }
-    const hit = graph.nodes.find((node) => (node.title + ' ' + node.note).toLowerCase().indexOf(query) !== -1)
-    searchHit = hit === undefined ? undefined : hit.id
+    if (query === '') { searchHits = []; searchIndex = -1; $('searchCount').textContent = ''; render(); return }
+    searchHits = graph.nodes
+      .filter((node) => (node.title + ' ' + node.note).toLowerCase().indexOf(query) !== -1)
+      .map((node) => node.id)
+    searchIndex = -1
+    $('searchCount').textContent = searchHits.length === 0 ? '0/0' : '1/' + searchHits.length
     render()
-    status(hit === undefined ? '没找到匹配节点' : '匹配：' + hit.title + '（回车定位）')
+    status(searchHits.length === 0 ? '没找到匹配节点' : '匹配 ' + searchHits.length + ' 个节点（回车逐个定位）')
   })
   $('search').addEventListener('keydown', (event) => {
-    if (event.key !== 'Enter' || searchHit === undefined) return
-    const node = KG.nodeById(graph, searchHit)
+    if (event.key !== 'Enter' || searchHits.length === 0) return
+    searchIndex = (searchIndex + 1) % searchHits.length   // 首次回车定位第一个，再按在匹配间循环
+    const node = KG.nodeById(graph, searchHits[searchIndex])
     if (node === undefined) return
     view = { x: canvas.clientWidth / 2 - node.x * view.k, y: canvas.clientHeight / 2 - node.y * view.k, k: view.k }
     selection = { node: node.id, nodes: node.id === undefined ? [] : [node.id], edge: undefined }
-    render(); syncPanel()
+    $('searchCount').textContent = (searchIndex + 1) + '/' + searchHits.length
+    render(); syncPanel(); saveView()
     toast('已定位到 ' + node.title)
   })
 
@@ -2092,10 +2142,14 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
     graph = KG.sanitize(raw, name)
     selection = { node: undefined, nodes: [], edge: undefined }
     linkFrom = undefined
-    searchHit = undefined
+    searchHits = []; searchIndex = -1
     $('search').value = ''
+    $('searchCount').textContent = ''
     history = []; future = []
-    doFit(); syncPanel()
+    // 打开框架即恢复上次视图；没记过才做适应窗口
+    const restoredView = loadView()
+    view = restoredView !== undefined ? restoredView : KG.fit(graph, canvas.clientWidth, canvas.clientHeight)
+    render(); syncPanel()
     await refreshList()
     status('已打开 ' + name + '（' + graph.nodes.length + ' 节点 / ' + graph.edges.length + ' 连线）')
   }
@@ -2123,7 +2177,8 @@ if (typeof document !== 'undefined' && document.getElementById('canvas')) {
       }
     }
     await refreshList()
-    view = KG.fit(graph, canvas.clientWidth, canvas.clientHeight)
+    const restoredView = loadView()
+    view = restoredView !== undefined ? restoredView : KG.fit(graph, canvas.clientWidth, canvas.clientHeight)
     render(); syncPanel()
     status('就绪 · ' + graph.name + '（' + graph.nodes.length + ' 节点）')
   })()

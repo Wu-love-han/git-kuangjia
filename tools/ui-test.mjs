@@ -380,6 +380,31 @@ await sleep(250)
 const layoutToast = await evaluate('document.getElementById("toast").textContent')
 check(layoutToast.indexOf('树状') !== -1, '提示里写明用的是哪种布局', layoutToast.slice(0, 60))
 
+// ---------------------------------------------------------------- 11. 搜索增强 / PNG 倍率 / 视图记忆
+console.log('# 搜索增强 / PNG 倍率 / 视图记忆')
+check((await evaluate('document.querySelectorAll("#pngScale option").length')) === 3, 'PNG 倍率下拉有 1x/2x/3x')
+check((await evaluate('document.getElementById("pngScale").value')) === '2', 'PNG 倍率默认 2x')
+// 搜索「甲」：只有一个匹配，其余节点/连线淡化，匹配节点加粗高亮
+await evaluate('(() => { const el = document.getElementById("search"); el.value = "甲"; el.dispatchEvent(new Event("input", { bubbles: true })); })()')
+await sleep(300)
+check((await evaluate('document.querySelectorAll("#world .dim").length')) >= 2, '搜索时未匹配的节点和连线被淡化', String(await evaluate('document.querySelectorAll("#world .dim").length')))
+check((await evaluate('document.querySelectorAll("#world .node-box.hit").length')) === 1, '匹配节点带高亮加粗描边')
+check((await evaluate('document.getElementById("searchCount").textContent')) === '1/1', '搜索框旁显示 n/m 计数', await evaluate('document.getElementById("searchCount").textContent'))
+await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Enter', code: 'Enter', windowsVirtualKeyCode: 13 })
+await sleep(250)
+check((await evaluate('document.getElementById("searchCount").textContent')) === '1/1', '回车循环定位后计数正确')
+// 清空恢复
+await evaluate('(() => { const el = document.getElementById("search"); el.value = ""; el.dispatchEvent(new Event("input", { bubbles: true })); })()')
+await sleep(250)
+check((await evaluate('document.querySelectorAll("#world .dim").length')) === 0, '清空搜索后画布恢复原状')
+check((await evaluate('document.querySelectorAll("#world .node-box.hit").length')) === 0, '清空搜索后高亮消失')
+// 视图记忆：适应窗口后 kgview:<框架名> 写进 localStorage
+await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70 })
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70 })
+await sleep(300)
+check((await evaluate('(() => { const raw = localStorage.getItem("kgview:UITest"); return raw !== null && JSON.parse(raw).k > 0; })()')) === true, '适应窗口后视图状态记在本地（kgview:框架名）')
+
 // ---------------------------------------------------------------- 10. 保存到临时目录
 await sleep(1200)
 const saved = await (await fetch(BASE + '/api/graph?name=UITest')).json()
