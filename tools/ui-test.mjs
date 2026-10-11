@@ -322,7 +322,65 @@ const widthAfter = await evaluate('document.getElementById("side").getBoundingCl
 check(widthAfter > widthBefore + 30, '拖分隔条能把右侧拉宽', widthBefore.toFixed(0) + ' -> ' + widthAfter.toFixed(0))
 check((await evaluate('JSON.parse(localStorage.getItem("kg.ui.v1")).sideWidth')) === Math.round(widthAfter), '右侧宽度记在本地')
 
-// ---------------------------------------------------------------- 9. 保存到临时目录
+// ---------------------------------------------------------------- 9. 右键框选 + 拖动改大小 + 布局类型
+console.log('# 右键框选 / 拖动改大小 / 布局类型')
+const canvasBox = await evaluate('(() => { const r = document.getElementById("canvas").getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })()')
+await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70 })
+await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'f', code: 'KeyF', windowsVirtualKeyCode: 70 })
+await sleep(300)
+const allNames = await evaluate('[...document.querySelectorAll("[data-node]")].map((el) => el.getAttribute("data-node"))')
+await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: canvasBox.x + 6, y: canvasBox.y + 6, button: 'right', buttons: 2, clickCount: 1 })
+for (let step = 1; step <= 6; step += 1) {
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: canvasBox.x + (canvasBox.w - 12) * step / 6, y: canvasBox.y + (canvasBox.h - 12) * step / 6, button: 'right', buttons: 2 })
+  await sleep(40)
+}
+const bandDrawn = await evaluate('document.querySelectorAll("svg rect[stroke-dasharray]").length')
+await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: canvasBox.x + canvasBox.w - 6, y: canvasBox.y + canvasBox.h - 6, button: 'right', buttons: 0, clickCount: 1 })
+await sleep(300)
+check(bandDrawn >= 1, '右键拖动时画出选框', String(bandDrawn))
+const multiText = await evaluate('document.getElementById("multiHint").textContent')
+check(multiText.indexOf('已选 ' + allNames.length + ' 个节点') !== -1, '框选把圈到的节点全选中', multiText)
+check((await evaluate('document.getElementById("menu").classList.contains("on")')) === false, '拉框结束后不弹右键菜单')
+const xyA = await nodeXY(allNames[0])
+const xyB = await nodeXY(allNames[1])
+const grabBand = await nodeCenter(allNames[0])
+await press('mousePressed', grabBand.x, grabBand.y, 'left', 1)
+for (let step = 1; step <= 5; step += 1) {
+  await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: grabBand.x - step * 8, y: grabBand.y - step * 5, button: 'left', buttons: 1 })
+  await sleep(30)
+}
+await press('mouseReleased', grabBand.x - 40, grabBand.y - 25, 'left', 1)
+await sleep(300)
+const xyA2 = await nodeXY(allNames[0])
+const xyB2 = await nodeXY(allNames[1])
+check(Math.abs((xyA2.x - xyA.x) - (xyB2.x - xyB.x)) < 1.5, '框选后拖一个，圈里的节点一起动', (xyA2.x - xyA.x).toFixed(1) + ' vs ' + (xyB2.x - xyB.x).toFixed(1))
+check(Math.abs(xyA2.x - xyA.x) > 15, '确实移动了', (xyA2.x - xyA.x).toFixed(1))
+await click((await nodeCenter(allNames[0])).x, (await nodeCenter(allNames[0])).y)
+await sleep(250)
+const handle = await evaluate('(() => { const el = document.querySelector("[data-resize]"); if (el === null) return null; const r = el.getBoundingClientRect(); return { x: r.x + r.width / 2, y: r.y + r.height / 2 }; })()')
+check(handle !== null, '选中节点后出现右下角缩放手柄')
+if (handle !== null) {
+  const sizeBefore = await evaluate('(() => { const el = document.querySelector(\'[data-node="' + allNames[0] + '"] rect\'); return { w: parseFloat(el.getAttribute("width")), h: parseFloat(el.getAttribute("height")) }; })()')
+  await press('mousePressed', handle.x, handle.y, 'left', 1)
+  for (let step = 1; step <= 6; step += 1) {
+    await send('Input.dispatchMouseEvent', { type: 'mouseMoved', x: handle.x + step * 10, y: handle.y + step * 5, button: 'left', buttons: 1 })
+    await sleep(30)
+  }
+  await press('mouseReleased', handle.x + 60, handle.y + 30, 'left', 1)
+  await sleep(300)
+  const sizeAfter = await evaluate('(() => { const el = document.querySelector(\'[data-node="' + allNames[0] + '"] rect\'); return { w: parseFloat(el.getAttribute("width")), h: parseFloat(el.getAttribute("height")) }; })()')
+  check(sizeAfter.w > sizeBefore.w + 20, '拖把手把节点拉大了（宽度）', sizeBefore.w + ' -> ' + sizeAfter.w)
+  check(sizeAfter.h > sizeBefore.h + 5, '高度也变高了', sizeBefore.h + ' -> ' + sizeAfter.h)
+}
+const layoutOptions = await evaluate('[...document.getElementById("layoutKind").options].map((o) => o.value)')
+check(layoutOptions.length >= 6, '布局下拉里有多种类型', layoutOptions.join(','))
+const treeResult = await evaluate('(() => { const select = document.getElementById("layoutKind"); select.value = "tree"; select.dispatchEvent(new Event("change", { bubbles: true })); const nodes = [...document.querySelectorAll("[data-node]")]; const ys = nodes.map((el) => { const m = /translate\\(([-0-9.]+),([-0-9.]+)\\)/.exec(el.getAttribute("transform")); return parseFloat(m[2]); }); return { count: nodes.length, distinctY: new Set(ys.map((v) => Math.round(v))).size }; })()')
+check(treeResult.distinctY >= 2, '切到树状后节点分层（y 不再同一行）', JSON.stringify(treeResult))
+await sleep(250)
+const layoutToast = await evaluate('document.getElementById("toast").textContent')
+check(layoutToast.indexOf('树状') !== -1, '提示里写明用的是哪种布局', layoutToast.slice(0, 60))
+
+// ---------------------------------------------------------------- 10. 保存到临时目录
 await sleep(1200)
 const saved = await (await fetch(BASE + '/api/graph?name=UITest')).json()
 check(saved.nodes.length === 3 && saved.edges.length === 1, '改动已自动保存（临时目录）', saved.nodes.length + ' 节点 / ' + saved.edges.length + ' 边')
